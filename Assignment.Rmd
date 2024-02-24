@@ -1,0 +1,133 @@
+---
+title: "Prediction assignment writeup"
+author: "Lukas"
+date: "2024-02-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr) #clean table outputs into html doc
+library(caret) #provides all the machine learning models/funtions and tools
+library(dplyr) #data reorganizing
+library(rattle)#plotting package for rpart models
+library(doParallel) #multicore package (knn is particularly computationally intense)
+library(GGally) #ggpairs plotting of correlation between variables 
+knitr::opts_chunk$set(echo = TRUE,message=F,warning=F)
+```
+
+This document aims at developing a statistical model for Human Activity Recognition or HAR. The prediction aims at evaluating how well a unilateral dumbbell bicep curl is performed. This [Weight Lifting Exercise data](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har) contains measurements on six male participants.
+
+### Data acquisition
+```{r}
+#training data
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv','training.csv') 
+
+#testing data
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv','testing.csv') 
+```
+
+```{r}
+training<-read.csv('training.csv')
+testing<-read.csv('testing.csv')
+```
+
+### Exploratory data analysis on the training data set
+
+We first want to assess the nature of the outcome variable we want to predict. In this instance, it concerns the *classe* variable in the dataset, that entails a scoring value, evaluated on a scale of **A**-**E**. 
+
+```{r}
+kable(table(training$classe))
+```
+
+Furthermore we want to look at the dimension of the available measurement variables that can be worked with. The first 15 variables of the 152 are shown below. Noteworthy, the variables are quite heterogeneous in their classes. 
+```{r,comment=''}
+str(training[,-c(1:7,160)],L = as.list(1:15),list.len=25)
+```
+```{r}
+training$classe<-factor(training$classe)
+training_GA<-select(training,starts_with(c('gyros','accel','classe')))
+testing_GA<-select(testing,starts_with(c('gyros','accel','classe')))
+```
+
+The data set which we'll use to train the prediction models coincide with the raw sensor data of the gyroscope and accelerometer measurements.
+
+
+```{r,comment=''}
+str(training_GA)
+```
+
+When plotting the pairs data for the first 6 variables, we can spot some sporadic correlation. The numeric values for the measurements are also quite over the place, which would benefit from some rescaling and centering (normalizing the values) in a preprocessing step, prior to the training of the model. 
+
+```{r,out.width='105%'}
+ggpairs(training_GA,columns = 1:6)
+```
+
+
+We have access to gyroscope and accelerometer data on the arm, forearm, dumbbell and belt, for all three-dimensional axes of x, y and z. This amounts to 24 numeric measurement variables. This subset of data, further denoted as training_GA (**G**-gyroscope & **A**-accelerometer), will be subjected to a classification model to predict the *classe* outcome. The first model under scrutiny is a general Classification and Regression Tree in the **rpart** method. This model was chosen for its general ease of interpretation and visualization.  
+
+For cross validation, the default implementation of 10-fold cross validation was implemented, repeated 5 times. Therefore, in this case the training data was subset in 10 validation subsets. Each validation subset was evaluated with the other 9 subsets as training data. Tenfold is quite robust as it uses most of the training data and a rather small subset to validate. If we'd however opt for leave one out cross validation (LOOCV) we'd run into a massive increase in computation time, since we'd increase our cross validation steps from 10 to the amount of observations in our dataset (19622). 
+
+```{r,comment=''}
+rpart_GA_model<-train(classe~.,training_GA,
+                      method='rpart',
+                      preProcess=c('center','scale'),
+                      trControl=trainControl(method='repeatedcv',repeats = 5))
+
+confusionMatrix(predict(rpart_GA_model,training_GA),training_GA$classe)
+```
+
+The model can somewhat assign a performance classification of **A, D and E** for the Weight Lifting Exercise (WLE) fairly well, it can however not even remotely distinguish **B and C**, which results in an overall poor performance of just about 44% accuracy. 
+
+```{r,out.width='105%'}
+fancyRpartPlot(rpart_GA_model$finalModel)
+```
+
+When we take another non-parametric classification model into account however, determination of the classes through k-nearest-neighbors (KNN), our prediction accuracy within the training set dramatically improves. 
+
+
+```{r,comment='',cache=T}
+cl <- makePSOCKcluster(12) 
+#'assign more CPU cores to this task, decreases computation time
+#'massively!
+registerDoParallel(cl)
+set.seed(73)
+knn_GA_model<-train(classe~.,training_GA,
+                      method='knn',
+                      preProcess=c('center','scale'),
+                      trControl=trainControl(method='repeatedcv',repeats = 5),
+                      tuneLength=10)
+
+confM<-confusionMatrix(predict(knn_GA_model,training_GA),training_GA$classe)
+confM
+stopCluster(cl)
+```
+The model accuracy now amounts to over 98%. Note that the preprocessing by centering and scaling all 24 variables contributed to 3% of that accuracy. Strangely when preprocessing with *knnImpute*, this also denoted a ~3% accuracy improvement as opposed to no preprocessing. This is strange in the sense that *knnImpute* is a means to eliminate NA values by providing the value of its nearest neighbors for that variable. This dataset is however devoid of any NA values. 
+
+
+```{r}
+plot(knn_GA_model,ylim=c(0,1.1))
+```
+
+The k-value at which the model has this high accuracy is 5. We must however take into account that a lower k-value often coincides with overfitting. Whether that's an issue at the moment remains to be evaluated. Some accuracy can however be traded for this potential overfitting by moving to a larger *K* and still achieve a good prediction model. 
+
+
+## Prediction of the test data-set
+```{r}
+pred_test<-predict(knn_GA_model,testing_GA)
+pred_test
+```
+
+```{r}
+accuracy<-confM$overall[1]
+
+errorfreq<-(1-accuracy)^(-1)
+
+errorfreq<-errorfreq[1]
+```
+
+In the training model, the miss classification rate was 1 in `r round(errorfreq,1)`. We do however expect this miss classification rate to be higher in the actual population (i.e. lower accuracy). Given the test data only contained 20 observations, it is hard to predict how many, if any, observations will be miss classified. An actual out of sample error rate could be calculated given a test data set of which the **classe** outcome variable is actually **known**. 
+
+
+
+
+
